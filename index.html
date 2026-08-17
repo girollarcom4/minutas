@@ -6,15 +6,22 @@
 <meta name="robots" content="noindex,nofollow">
 <title>Validacao de Minutas Girollar</title>
 <!--
-  POR QUE O ENDERECO DE DESTINO NAO ESTA NESTE ARQUIVO:
+  DE ONDE VEM O ENDERECO DE DESTINO, E POR QUE NAO DAQUI:
 
-  O GitHub Pages serve esta pagina com "Cache-Control: max-age=600" -- o navegador guarda
-  o HTML por 10 minutos. Se o tunel trocar de endereco nesse intervalo (e ele troca a cada
-  auto-cura), a copia em cache manda o usuario para um tunel MORTO: Error 1033. Aconteceu
-  de verdade no primeiro teste do usuario, em 17/08/2026.
+  1) Nao pode estar embutido neste HTML. O GitHub Pages responde com
+     "Cache-Control: max-age=600", entao o navegador guarda a pagina por 10 min. Se o
+     tunel trocar de endereco nesse meio tempo -- e ele troca a cada recuperacao -- a
+     copia em cache despacha o usuario para um tunel MORTO (Error 1033/1016). Aconteceu
+     em 17/08/2026.
 
-  Por isso o destino vive em destino.json, buscado com cache-buster e no-store. Mesmo com
-  este HTML vindo do cache, o endereco e sempre o atual.
+  2) Tambem nao basta ler destino.json daqui do Pages com "?t=<agora>". O Pages fica
+     atras da CDN Fastly, e medimos a CDN servindo a copia ANTIGA (Age: 33) enquanto o
+     repositorio ja tinha a nova -- o cache-buster engana o navegador, nao a CDN. Bem na
+     hora que mais importa: logo apos uma recuperacao do tunel.
+
+  Por isso a fonte primaria e a API do GitHub, que responde o conteudo do repositorio sem
+  essa camada de cache. O destino.json do Pages fica como reserva, para o caso de a API
+  falhar ou estourar limite (60 req/h por IP, sem autenticacao).
 -->
 <style>
   :root{--bg:#f6f7f9;--fg:#1a2332;--mut:#5b6878;--card:#fff;--bd:#e3e7ec;--ac:#1e3a5f;--err:#b4232c}
@@ -24,12 +31,13 @@
        background:var(--bg);color:var(--fg);
        font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   .c{background:var(--card);border:1px solid var(--bd);border-radius:14px;
-     padding:32px 28px;max-width:460px;width:100%;text-align:center}
+     padding:32px 28px;max-width:470px;width:100%;text-align:center}
   h1{margin:0 0 6px;font-size:1.15rem;letter-spacing:-.01em}
   p{margin:0 0 18px;color:var(--mut);font-size:.92rem}
-  a.b{display:inline-block;background:var(--ac);color:#fff;text-decoration:none;
-      padding:11px 22px;border-radius:8px;font-weight:600;font-size:.93rem}
-  a.b[hidden]{display:none}
+  a.b,button.b{display:inline-block;background:var(--ac);color:#fff;text-decoration:none;
+      padding:11px 22px;border-radius:8px;font-weight:600;font-size:.93rem;
+      border:0;cursor:pointer;font-family:inherit}
+  [hidden]{display:none !important}
   .s{margin-top:20px;font-size:.75rem;color:var(--mut);word-break:break-all}
   .d{display:inline-block;width:7px;height:7px;border-radius:50%;background:#3fa66a;margin-right:6px}
   .e{color:var(--err);font-size:.85rem}
@@ -40,6 +48,7 @@
     <h1><span class="d"></span>Validacao de Minutas</h1>
     <p id="msg">Localizando o sistema&hellip;</p>
     <a class="b" id="ir" href="#" hidden>Entrar agora</a>
+    <button class="b" id="retry" hidden>Tentar novamente</button>
     <div class="s" id="det"></div>
     <noscript>
       <p class="e">Este atalho precisa de JavaScript. Peca o endereco atual a quem administra o sistema.</p>
@@ -48,28 +57,81 @@
 <script>
 (function () {
   var msg = document.getElementById("msg");
-  var ir  = document.getElementById("ir");
+  var ir = document.getElementById("ir");
+  var retry = document.getElementById("retry");
   var det = document.getElementById("det");
 
-  fetch("destino.json?t=" + Date.now(), { cache: "no-store" })
-    .then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
+  var API = "https://api.github.com/repos/girollarcom4/minutas/contents/destino.json?ref=main";
+  var RESERVA = "destino.json";
+
+  function extrai(txt) {
+    // Remove BOM antes de parsear: o publicador escreve com Set-Content -Encoding utf8,
+    // que no PowerShell 5.1 grava COM BOM, e JSON.parse engasga com ele.
+    var j = JSON.parse(txt.replace(/^﻿/, ""));
+    if (!j || !j.url) throw new Error("destino sem url");
+    return j;
+  }
+
+  // Fonte primaria: API do GitHub (sem a CDN do Pages na frente, entao sempre atual).
+  function viaApi() {
+    return fetch(API, {
+      cache: "no-store",
+      headers: { Accept: "application/vnd.github.v3+json" }
     })
-    .then(function (j) {
-      if (!j || !j.url) throw new Error("destino vazio");
-      ir.href = j.url;
-      ir.hidden = false;
-      msg.textContent = "Redirecionando…";
-      det.textContent = "Endereco: " + j.url + (j.atualizado ? " · atualizado em " + j.atualizado : "");
-      location.replace(j.url);
-    })
-    .catch(function (e) {
-      msg.textContent = "Nao consegui localizar o sistema agora.";
-      det.innerHTML =
-        '<span class="e">O notebook do escritorio pode estar desligado, ou o tunel fora do ar. ' +
-        "Tente de novo em alguns minutos.</span><br><br>(" + e.message + ")";
-    });
+      .then(function (r) {
+        if (!r.ok) throw new Error("API " + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        if (!j.content) throw new Error("API sem conteudo");
+        return extrai(decodeURIComponent(escape(atob(j.content.replace(/\s/g, "")))));
+      });
+  }
+
+  // Reserva: o arquivo servido pelo proprio Pages. Pode estar alguns minutos atrasado,
+  // mas e melhor que nada quando a API falha ou estoura limite.
+  function viaPages() {
+    return fetch(RESERVA + "?t=" + Date.now(), { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Pages " + r.status);
+        return r.text();
+      })
+      .then(extrai);
+  }
+
+  function sucesso(j, fonte) {
+    ir.href = j.url;
+    ir.hidden = false;
+    msg.textContent = "Redirecionando…";
+    det.textContent = "Endereco: " + j.url +
+      (j.atualizado ? " · atualizado em " + j.atualizado : "") +
+      " · via " + fonte;
+    location.replace(j.url);
+  }
+
+  function falhou(e) {
+    msg.textContent = "Nao consegui localizar o sistema agora.";
+    retry.hidden = false;
+    det.innerHTML =
+      '<span class="e">O notebook do escritorio pode estar desligado, ou o tunel fora do ar. ' +
+      "Se ele acabou de cair, a recuperacao automatica leva ate 5 minutos.</span><br><br>(" +
+      (e && e.message ? e.message : e) + ")";
+  }
+
+  function tentar() {
+    msg.textContent = "Localizando o sistema…";
+    retry.hidden = true;
+    det.textContent = "";
+    viaApi()
+      .then(function (j) { sucesso(j, "API"); })
+      .catch(function () {
+        return viaPages().then(function (j) { sucesso(j, "reserva"); });
+      })
+      .catch(falhou);
+  }
+
+  retry.addEventListener("click", tentar);
+  tentar();
 })();
 </script>
 </body>
